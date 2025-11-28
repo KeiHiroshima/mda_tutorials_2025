@@ -22,9 +22,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.datasets import make_classification
+import torchvision
+import torchvision.transforms as transforms
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
@@ -47,28 +49,28 @@ print("\n" + "=" * 50)
 print("演習1: モデルの層数と性能の関係")
 print("=" * 50)
 
-# データセットの生成
-X, y = make_classification(
-    n_samples=1000,
-    n_features=20,
-    n_informative=15,
-    n_redundant=5,
-    n_classes=2,
-    random_state=42,
+# MNISTデータセットの準備
+transform = transforms.Compose(
+    [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))]
 )
 
-# データをPyTorchテンソルに変換
-X = torch.tensor(X, dtype=torch.float32)
-y = torch.tensor(y, dtype=torch.float32).view(-1, 1)
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
+train_dataset = torchvision.datasets.MNIST(
+    root="./data", train=True, download=True, transform=transform
+)
+# downsize for faster training during the exercise
+train_dataset.data = np.random.permutation(train_dataset.data)[:30000]
+test_dataset = torchvision.datasets.MNIST(
+    root="./data", train=False, download=True, transform=transform
 )
 
-train_dataset = TensorDataset(X_train, y_train)
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
 
-X_test, y_test = X_test.to(device), y_test.to(device)
+# データセット全体をメモリにロード（演習用）
+X_train = train_dataset.data.view(len(train_dataset), -1).float().to(device)
+y_train = train_dataset.targets.to(device)
+X_test = test_dataset.data.view(len(test_dataset), -1).float().to(device)
+y_test = test_dataset.targets.to(device)
 
 
 print(f"訓練データ: {X_train.shape}, テストデータ: {X_test.shape}")
@@ -86,14 +88,13 @@ def create_model(n_layers, input_features, units_per_layer=64):
         layers.append(nn.Linear(units_per_layer, units_per_layer))
         layers.append(nn.ReLU())
 
-    layers.append(nn.Linear(units_per_layer, 1))
-    layers.append(nn.Sigmoid())
+    layers.append(nn.Linear(units_per_layer, 10))
 
     return nn.Sequential(*layers)
 
 
 # 異なる層数でモデルを学習
-layer_configs = [1, 2, 3, 5, 10]
+layer_configs = [1, 5, 10]
 results = []
 
 print("\n各層数でのモデル学習を開始...")
@@ -101,16 +102,19 @@ print("\n各層数でのモデル学習を開始...")
 for n_layers in layer_configs:
     print(f"\n層数: {n_layers}")
 
-    model = create_model(n_layers, X_train.shape[1]).to(device)
+    model = create_model(n_layers, 784).to(device)
     optimizer = optim.Adam(model.parameters())
-    criterion = nn.BCELoss()
+    criterion = nn.CrossEntropyLoss()
+    n_epochs = 50
 
     history = {"accuracy": [], "val_accuracy": []}
 
-    for epoch in range(50):
+    for epoch in tqdm(range(n_epochs), desc=f"Training {n_layers}-layer model"):
         model.train()
         for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            batch_X = batch_X.view(-1, 784).to(device)
+            batch_y = batch_y.to(device)
+
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
@@ -121,13 +125,14 @@ for n_layers in layer_configs:
         model.eval()
         with torch.no_grad():
             # 訓練精度
-            train_outputs = model(X_train.to(device))
-            train_preds = (train_outputs > 0.5).float()
-            train_acc = (train_preds == y_train.to(device)).float().mean().item()
+            train_outputs = model(X_train)
+            _, train_preds = torch.max(train_outputs, 1)
+            train_acc = (train_preds == y_train).float().mean().item()
             history["accuracy"].append(train_acc)
+
             # 検証(テスト)精度
             test_outputs = model(X_test)
-            test_preds = (test_outputs > 0.5).float()
+            _, test_preds = torch.max(test_outputs, 1)
             val_acc = (test_preds == y_test).float().mean().item()
             history["val_accuracy"].append(val_acc)
 
@@ -196,16 +201,16 @@ print("=" * 50)
 class RegularizedModel(nn.Module):
     def __init__(self):
         super(RegularizedModel, self).__init__()
-        self.fc1 = nn.Linear(X_train.shape[1], 128)
+        self.fc1 = nn.Linear(784, 128)
         self.fc2 = nn.Linear(128, 64)
         self.fc3 = nn.Linear(64, 32)
-        self.fc4 = nn.Linear(32, 1)
+        self.fc4 = nn.Linear(32, 10)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         x = torch.relu(self.fc3(x))
-        x = torch.sigmoid(self.fc4(x))
+        x = self.fc4(x)
         return x
 
 
@@ -225,14 +230,16 @@ for name, reg_type, reg_lambda in regularization_configs:
     model = RegularizedModel().to(device)
     l2_lambda = reg_lambda if reg_type == "l2" else 0
     optimizer = optim.Adam(model.parameters(), weight_decay=l2_lambda)
-    criterion = nn.BCELoss()
+    criterion = nn.CrossEntropyLoss()
+    n_epochs = 50
 
     history = {"accuracy": [], "val_accuracy": []}
 
-    for epoch in range(100):
+    for epoch in tqdm(range(n_epochs), desc=f"Training {name}"):
         model.train()
         for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            batch_X = batch_X.view(-1, 784).to(device)
+            batch_y = batch_y.to(device)
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
@@ -247,12 +254,12 @@ for name, reg_type, reg_lambda in regularization_configs:
 
         model.eval()
         with torch.no_grad():
-            train_outputs = model(X_train.to(device))
-            train_preds = (train_outputs > 0.5).float()
-            train_acc = (train_preds == y_train.to(device)).float().mean().item()
+            train_outputs = model(X_train)
+            _, train_preds = torch.max(train_outputs, 1)
+            train_acc = (train_preds == y_train).float().mean().item()
             history["accuracy"].append(train_acc)
             test_outputs = model(X_test)
-            test_preds = (test_outputs > 0.5).float()
+            _, test_preds = torch.max(test_outputs, 1)
             val_acc = (test_preds == y_test).float().mean().item()
             history["val_accuracy"].append(val_acc)
 
@@ -308,7 +315,7 @@ plt.tight_layout()
 plt.savefig("exercise2_regularization.png", dpi=150, bbox_inches="tight")
 print("\n図を 'exercise2_regularization.png' として保存しました")
 plt.show()
-
+"""
 # =====================================
 # 演習3: バッチ正規化の効果
 # =====================================
@@ -320,15 +327,14 @@ print("=" * 50)
 
 def create_model_with_batchnorm(use_batchnorm=False):
     layers = []
-    input_dim = X_train.shape[1]
+    input_dim = 784
     for units in [128, 64, 32, 16]:
         layers.append(nn.Linear(input_dim, units))
         if use_batchnorm:
             layers.append(nn.BatchNorm1d(units))
         layers.append(nn.ReLU())
         input_dim = units
-    layers.append(nn.Linear(input_dim, 1))
-    layers.append(nn.Sigmoid())
+    layers.append(nn.Linear(input_dim, 10))
     return nn.Sequential(*layers)
 
 
@@ -342,13 +348,14 @@ for name, use_bn in bn_configs:
     print(f"\n{name}")
     model = create_model_with_batchnorm(use_bn).to(device)
     optimizer = optim.Adam(model.parameters())
-    criterion = nn.BCELoss()
+    criterion = nn.CrossEntropyLoss()
     history = {"accuracy": [], "val_accuracy": []}
 
-    for epoch in range(100):
+    for epoch in tqdm(range(100), desc=f"Training {name}"):
         model.train()
         for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            batch_X = batch_X.view(-1, 784).to(device)
+            batch_y = batch_y.to(device)
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
@@ -357,12 +364,13 @@ for name, use_bn in bn_configs:
 
         model.eval()
         with torch.no_grad():
-            train_outputs = model(X_train.to(device))
-            train_preds = (train_outputs > 0.5).float()
-            train_acc = (train_preds == y_train.to(device)).float().mean().item()
+            train_outputs = model(X_train)
+            _, train_preds = torch.max(train_outputs, 1)
+            train_acc = (train_preds == y_train).float().mean().item()
             history["accuracy"].append(train_acc)
+
             test_outputs = model(X_test)
-            test_preds = (test_outputs > 0.5).float()
+            _, test_preds = torch.max(test_outputs, 1)
             val_acc = (test_preds == y_test).float().mean().item()
             history["val_accuracy"].append(val_acc)
 
@@ -412,13 +420,13 @@ plt.tight_layout()
 plt.savefig("exercise3_batchnorm.png", dpi=150, bbox_inches="tight")
 print("\n図を 'exercise3_batchnorm.png' として保存しました")
 plt.show()
-
+"""
 # =====================================
-# 演習4: 時系列データを扱うモデル（LSTM）
+# 演習3: 時系列データを扱うモデル（LSTM）
 # =====================================
 
 print("\n" + "=" * 50)
-print("演習4: 時系列データを扱うモデル（LSTM）")
+print("演習3: 時系列データを扱うモデル（LSTM）")
 print("=" * 50)
 
 
@@ -484,9 +492,10 @@ def train_ts_model(model, loader):
     optimizer = optim.Adam(model.parameters())
     criterion = nn.MSELoss()
     mae_loss = nn.L1Loss()
+    n_epochs = 50
     history = {"loss": [], "val_loss": []}
 
-    for epoch in range(50):
+    for epoch in range(n_epochs):
         model.train()
         for batch_X, batch_y in loader:
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
