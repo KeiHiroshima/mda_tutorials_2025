@@ -1,7 +1,11 @@
 data/
 imgs/
+refs/
 *.png
 *.jpg
+*.gz
+
+
 # Python-generated files
 __pycache__/
 *.py[oc]
