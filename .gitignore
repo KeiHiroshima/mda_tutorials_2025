@@ -1,6 +1,7 @@
 data/
 imgs/
 refs/
+pdfs/
 *.png
 *.jpg
 *.gz
